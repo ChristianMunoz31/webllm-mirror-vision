@@ -49,16 +49,50 @@ jobs:
           mv model/* "models/${HF_ID#*/}/"
           rm -rf model
 
-      - name: Commit & push
+      - name: Commit & push (batched)
         env:
           HF_ID: ${{ github.event.inputs.hf_model_id }}
         run: |
           git config user.name "mirror-bot"
           git config user.email "actions@github.com"
-          git add models/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"
-            exit 0
+          # A single ~3 GB push exceeds GitHub's HTTP endpoint timeout (~6 min)
+          # and returns HTTP 500 mid-transfer. Batch the files into smaller
+          # commits and push each â€” each batch transfers ~200-400 MB and
+          # completes well under the timeout. Retry each push up to 3 times
+          # in case of transient 500s.
+          MODEL_DIR="models/${HF_ID#*/}"
+          if [ ! -d "$MODEL_DIR" ]; then
+            echo "Model directory $MODEL_DIR not found"
+            exit 1
           fi
-          git commit -m "Mirror ${HF_ID}"
-          git push
+          BATCH_SIZE=8
+          mapfile -t files < <(ls "$MODEL_DIR")
+          total=${#files[@]}
+          echo "Pushing $total files from $MODEL_DIR in batches of $BATCH_SIZE"
+          batch_num=0
+          for ((i=0; i<total; i+=BATCH_SIZE)); do
+            batch_num=$((batch_num+1))
+            batch=("${files[@]:i:BATCH_SIZE}")
+            for f in "${batch[@]}"; do
+              git add "$MODEL_DIR/$f"
+            done
+            if git diff --cached --quiet; then
+              echo "Batch $batch_num: nothing to commit, skipping"
+              continue
+            fi
+            git commit -m "Mirror ${HF_ID} (batch $batch_num)"
+            # Retry push up to 3 times for transient HTTP 500s
+            for attempt in 1 2 3; do
+              if git push; then
+                echo "Batch $batch_num pushed on attempt $attempt"
+                break
+              fi
+              if [ "$attempt" = "3" ]; then
+                echo "Batch $batch_num failed after 3 attempts"
+                exit 1
+              fi
+              echo "Batch $batch_num push attempt $attempt failed, sleeping 15s"
+              sleep 15
+            done
+          done
+          echo "All $batch_num batches pushed successfully"
