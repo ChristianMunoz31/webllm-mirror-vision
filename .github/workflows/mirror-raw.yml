@@ -1,0 +1,64 @@
+# Copy this file to a new GitHub repo at .github/workflows/mirror-raw.yml,
+# then go to Actions â†’ "Mirror MLC model from Hugging Face (Raw)" â†’ Run workflow.
+# After it finishes (~5â€“10 minutes for a 1B model), paste this URL into the
+# app's Settings â†’ Model mirror:
+#
+#   https://raw.githubusercontent.com/<your-username>/<this-repo>/main/models
+#
+# Files will live at:
+#   https://raw.githubusercontent.com/<user>/<repo>/main/models/<MODEL_ID>/<file>
+#
+# This workflow only works for models whose shards stay under GitHub's
+# 100 MB raw-file limit â€” typically q4f16 variants. Use mirror-releases.yml
+# for q4f32 or larger models.
+
+name: Mirror MLC model from Hugging Face (Raw)
+on:
+  workflow_dispatch:
+    inputs:
+      hf_model_id:
+        description: 'HF model ID (e.g. mlc-ai/SmolLM2-1.7B-Instruct-q4f16_1-MLC)'
+        required: true
+        default: 'mlc-ai/SmolLM2-1.7B-Instruct-q4f16_1-MLC'
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install git-lfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Clone HF model
+        env:
+          HF_ID: ${{ github.event.inputs.hf_model_id }}
+        run: |
+          rm -rf model
+          git clone "https://huggingface.co/${HF_ID}" model
+          cd model && git lfs pull && cd ..
+          rm -rf model/.git
+          # ${HF_ID#*/} strips the "mlc-ai/" prefix so the path matches the
+          # WebLLM model_id exactly (e.g. SmolLM2-1.7B-Instruct-q4f16_1-MLC).
+          mkdir -p "models/${HF_ID#*/}"
+          mv model/* "models/${HF_ID#*/}/"
+          rm -rf model
+
+      - name: Commit & push
+        env:
+          HF_ID: ${{ github.event.inputs.hf_model_id }}
+        run: |
+          git config user.name "mirror-bot"
+          git config user.email "actions@github.com"
+          git add models/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Mirror ${HF_ID}"
+          git push
